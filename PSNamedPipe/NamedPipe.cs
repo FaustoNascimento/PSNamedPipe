@@ -136,7 +136,7 @@ namespace PSNamedPipe
             GC.SuppressFinalize(this);
         }
 
-        protected void Dispose(bool disposing)
+        protected virtual void Dispose(bool disposing)
         {
             if (!disposing || _disposed) return;
 

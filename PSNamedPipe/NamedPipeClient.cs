@@ -1,13 +1,13 @@
 ﻿using System;
 using System.IO.Pipes;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace PSNamedPipe
 {
     public class NamedPipeClient : NamedPipe
     {
         private readonly NamedPipeClientStream _pipe;
+        private CancellationTokenSource _connectCancellationTokenSource;
 
         protected NamedPipeClient(NamedPipeClientStream pipe) : base(pipe)
         {
@@ -25,44 +25,56 @@ namespace PSNamedPipe
             return wrapper;
         }
 
-        public void Connect(int timeout = Timeout.Infinite)
+        public void Connect()
         {
-            InternalConnect(timeout);
+            Connect(new CancellationToken());
         }
 
-        public async void ConnectAsync(int timeout = Timeout.Infinite)
+        public async void Connect(CancellationToken cancellationToken)
         {
-            await Task.Run(() => InternalConnect(timeout));
+            _connectCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            await _pipe.ConnectAsync(cancellationToken);
+
+            if (_pipe.IsConnected)
+            {
+                _connectCancellationTokenSource.Dispose();
+                _pipe.ReadMode = PipeTransmissionMode.Message;
+                Connection.Set();
+                Connected?.BeginInvoke(this, EventArgs.Empty, x => ((EventHandler)x.AsyncState).EndInvoke(x), Connected);
+
+                BeginRead();
+            }
         }
 
-        public Subscription ConnectAndSubscribe(int timeout = Timeout.Infinite)
+        public Subscription ConnectAndSubscribe()
+        {
+            return ConnectAndSubscribe(new CancellationToken());
+        }
+
+        public Subscription ConnectAndSubscribe(CancellationToken cancellationToken)
         {
             // Prevent race condition by subscribing first
             var subscription = Subscribe();
-            Connect(timeout);
+            Connect(cancellationToken);
             return subscription;
         }
 
-        public Subscription ConnectAsyncAndsubscribe(int timeout = Timeout.Infinite)
+        protected override void Dispose(bool disposing)
         {
-            // Prevent race condition by subscribing first
-            var subscription = Subscribe();
-            ConnectAsync(timeout);
-            return subscription;
+            try
+            {
+                _connectCancellationTokenSource?.Cancel();
+                _connectCancellationTokenSource?.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+
+            }            
+
+            base.Dispose(disposing);
         }
 
-        protected void InternalConnect(int timeout = Timeout.Infinite)
-        {
-            _pipe.Connect(timeout);
-            _pipe.ReadMode = PipeTransmissionMode.Message;
-            Connection.Set();
-            BeginRead();
-            
-            // All other events fire on a separate thread (inside an AsyncCallback),
-            // So let's ensure the same is true about this one
-            Connected?.BeginInvoke(this, EventArgs.Empty, x => ((EventHandler) x.AsyncState).EndInvoke(x), Connected);
-        }
-        
         public event EventHandler Connected;
     }
 }

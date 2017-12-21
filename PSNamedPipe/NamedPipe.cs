@@ -1,7 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
+using System.IO;
 using System.IO.Pipes;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
@@ -10,11 +9,11 @@ namespace PSNamedPipe
 {
     public abstract class NamedPipe : IDisposable
     {
-        private bool _disposed;
+        private const int HeaderSize = sizeof(int);
         private readonly PipeStream _pipe;
-        private byte[] _buffer;
-        private readonly List<byte> _message = new List<byte>();
+        private readonly SemaphoreSlim _writeSemaphore = new SemaphoreSlim(1);
         protected readonly ManualResetEventSlim Connection = new ManualResetEventSlim(false);
+        protected bool Disposed;
 
         protected NamedPipe(PipeStream pipe)
         {
@@ -43,89 +42,89 @@ namespace PSNamedPipe
 
         public PipeTransmissionMode TransmissionMode => _pipe.TransmissionMode;
 
-        private byte[] Buffer => _buffer ?? (_buffer = new byte[_pipe.InBufferSize]);
-        
-        protected virtual void BeginRead()
+        protected async void StartReading()
         {
-            BeginRead(Buffer, 0, Buffer.Length);
-        }
-
-        protected virtual void BeginRead(byte[] buffer, int offset, int count)
-        {
-            if (IsConnected)
+            while (true)
             {
-                _pipe.BeginRead(Buffer, offset, count, OnMessageAvailable, this);
+                if (!IsConnected) break;
+
+                await GetNextMessage().ConfigureAwait(false);
             }
         }
 
-        public virtual void WriteAsync(byte[] buffer)
+        private async Task GetNextMessage()
         {
-            WriteAsync(buffer, 0, buffer.Length);
+            try
+            {
+                // Get message size
+                var bufferMessageSize = await ReadNamedPipe(HeaderSize).ConfigureAwait(false);
+                var messageSize = BitConverter.ToInt32(bufferMessageSize, 0);
+
+                // Get actual message
+                var message = await ReadNamedPipe(messageSize).ConfigureAwait(false);
+
+                // Post message
+                var messageEventArgs = new MessageAvailableEventArgs(message);
+                MessageAvailable?.InvokeAsync(this, messageEventArgs);
+            }
+            catch (DisconnectedException)
+            {
+                Connection.Reset();
+                Disconnected?.InvokeAsync(this);
+            }
         }
 
-        public virtual async void WriteAsync(byte[] buffer, int offset, int count)
+        private async Task<byte[]> ReadNamedPipe(int count)
         {
-            await Task.Run(() => Write(buffer, offset, count));
+            var buffer = new byte[count];
+            var bytesRead = await _pipe.ReadAsync(buffer, 0, count).ConfigureAwait(false);
+
+            if (bytesRead == 0)
+            {
+                throw new DisconnectedException();
+            }
+
+            if (bytesRead != count)
+            {
+                throw new IOException("Number of expected bytes does not match number of read bytes");
+            }
+
+            return buffer;
         }
 
-        public virtual void Write(byte[] buffer)
+        public virtual Task WriteAsync(byte[] buffer, CancellationToken cancellationToken = default(CancellationToken))
         {
-            Write(buffer, 0, buffer.Length);
+            return WriteAsync(buffer, 0, buffer.Length, cancellationToken);
         }
 
-        public virtual void Write(byte[] buffer, int offset, int count)
+        public virtual async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default(CancellationToken))
         {
-            _pipe.Write(buffer, offset, count);
-        }
+            await _writeSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
 
-        protected virtual int EndRead(IAsyncResult result)
-        {
-            var bytesRead = _pipe.EndRead(result);
-            return bytesRead;
-        }
+            try
+            {
+                // Get and write length of message
+                var length = BitConverter.GetBytes(count);
+                await _pipe.WriteAsync(length, 0, HeaderSize, cancellationToken).ConfigureAwait(false);
 
+                // Write actual message
+                await _pipe.WriteAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                _writeSemaphore.Release();
+            }
+        }
+        
         public Subscription Subscribe()
         {
             return new Subscription(this);
         }
 
-        public void WaitConnection(int timeout = Timeout.Infinite)
-        {
-            Connection.Wait(timeout);
-        }
-
-        protected virtual void OnMessageAvailable(IAsyncResult result)
-        {
-            var messageLength = EndRead(result);
-
-            if (messageLength == 0)
-            {
-                Disconnected?.Invoke(result.AsyncState, EventArgs.Empty);
-                return;
-            }
-
-            _message.AddRange(_buffer.Take(messageLength));
-
-            var messageComplete = false;
-            var endMessage = new byte[0];
-
-            if (_pipe.IsMessageComplete)
-            {
-                endMessage = _message.ToArray();
-                _message.Clear();
-                messageComplete = true;
-            }
-
-            BeginRead();
-
-            if (!messageComplete) return;
-
-            var messageEventArgs = new MessageAvailableEventArgs(endMessage);
-            MessageAvailable?.Invoke(result.AsyncState, messageEventArgs);
-        }
-
         public void Dispose()
         {
+            if (Disposed) return;
+            
             // Disposing event will fire first followed by a Disconnected event (if pipe was connected).
             // While it could be argued that a Disconnection must happen before the object is disposed of,
             // The Disposing event simply implies that disposing has commenced - not that it has finished.
@@ -138,18 +137,10 @@ namespace PSNamedPipe
 
         protected virtual void Dispose(bool disposing)
         {
-            if (!disposing || _disposed) return;
+            if (!disposing) return;
 
-            Connection.Reset();
             _pipe.Dispose();
-            Connection.Dispose();
-
-            _disposed = true;
-        }
-
-        ~NamedPipe()
-        {
-            Dispose(false);
+            Disposed = true;
         }
 
         public event EventHandler<MessageAvailableEventArgs> MessageAvailable;

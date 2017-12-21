@@ -1,12 +1,14 @@
 ﻿using System;
 using System.IO.Pipes;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace PSNamedPipe
 {
     public class NamedPipeServer : NamedPipe
     {
+        private readonly SemaphoreSlim _connectSemaphore = new SemaphoreSlim(1);
         private readonly NamedPipeServerStream _pipe;
-        private bool _connecting;
 
         protected NamedPipeServer(NamedPipeServerStream pipe) : base(pipe)
         {
@@ -17,24 +19,35 @@ namespace PSNamedPipe
             int maxNumberOfServerInstances = 1, int inBufferSize = 1024, int outBufferSize = 1024, bool autoReconnect = true)
         {
             var pipe = new NamedPipeServerStream(pipeName, direction, maxNumberOfServerInstances,
-                PipeTransmissionMode.Message, PipeOptions.Asynchronous, inBufferSize, outBufferSize);
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous, inBufferSize, outBufferSize);
             var wrapper = new NamedPipeServer(pipe);
             
             return wrapper;
         }
 
-        public void Start()
+        public async Task Start(CancellationToken cancellationToken = default(CancellationToken))
         {
-            if (_connecting) throw new InvalidOperationException("Already awaiting connection.");
+            await _connectSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
 
-            BeginWaitForConnection();
+            try
+            {
+                await _pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
+
+                Connection.Set();
+                Connected?.InvokeAsync(this);
+                StartReading();
+            }
+            finally
+            {
+                _connectSemaphore.Release();
+            }
         }
 
-        public Subscription StartAndSubscribe()
+        public async Task<Subscription> StartAndSubscribe(CancellationToken cancellationToken = default(CancellationToken))
         {
             // Prevent race condition by subscribing first
             var subscription = Subscribe();
-            Start();
+            await Start(cancellationToken);
             return subscription;
         }
 
@@ -42,36 +55,6 @@ namespace PSNamedPipe
         {
             Connection.Reset();
             _pipe.Disconnect();
-        }
-
-        protected void BeginWaitForConnection()
-        {
-            _pipe.BeginWaitForConnection(OnClientConnected, this);
-            _connecting = true;
-        }
-
-        protected void EndWaitForConnection(IAsyncResult result)
-        {
-            _pipe.EndWaitForConnection(result);
-            _connecting = false;
-        }
-
-        protected virtual void OnClientConnected(IAsyncResult result)
-        {
-            try
-            {
-                EndWaitForConnection(result);
-                Connection.Set();
-                BeginRead();
-
-                Connected?.Invoke((NamedPipe) result.AsyncState, EventArgs.Empty);
-            }
-            catch (ObjectDisposedException)
-            {
-                // If Dispose() is called while waiting for a connection
-                // EndWaitForConnection() will throw ObjectDisposedException
-                // So just catch it and do nothing.
-            }
         }
 
         public event EventHandler Connected;

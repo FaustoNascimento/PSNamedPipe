@@ -24,13 +24,21 @@ namespace PSNamedPipe
 
         public byte[] NextMessage(int timeout = Timeout.Infinite)
         {
-            _queue.TryTake(out byte[] message, timeout);
+            _queue.TryTake(out var message, timeout);
             return message;
         }
 
         private void OnMessageAvailable(object sender, MessageAvailableEventArgs e)
         {
-            _queue.Add(e.Message);
+            // Safeguard against trying to add a message posted *after* CompleteAdding() has been invoked
+            // Simply checking !IsAddingCompleted before Add() would create a race condition.
+            try
+            {
+                _queue.Add(e.Message);
+            }
+            catch (InvalidOperationException)
+            {
+            }
         }
 
         public void Dispose()
@@ -48,11 +56,6 @@ namespace PSNamedPipe
             _queue.Dispose();
 
             _disposed = true;
-        }
-
-        ~Subscription()
-        {
-            Dispose(false);
         }
     }
 }

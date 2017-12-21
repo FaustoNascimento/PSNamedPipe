@@ -1,13 +1,15 @@
 ﻿using System;
 using System.IO.Pipes;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace PSNamedPipe
 {
     public class NamedPipeClient : NamedPipe
     {
+        private readonly SemaphoreSlim _connectSemaphore = new SemaphoreSlim(1);
+        private const int ConnectCheckInterval = 50; // same interval as used by NamedPipeClientStream internally
         private readonly NamedPipeClientStream _pipe;
-        private CancellationTokenSource _connectCancellationTokenSource;
 
         protected NamedPipeClient(NamedPipeClientStream pipe) : base(pipe)
         {
@@ -25,54 +27,65 @@ namespace PSNamedPipe
             return wrapper;
         }
 
-        public void Connect()
+        public async Task Connect(int timeout = Timeout.Infinite, CancellationToken cancellationToken = default(CancellationToken))
         {
-            Connect(new CancellationToken());
-        }
+            var startTime = Environment.TickCount;
 
-        public async void Connect(CancellationToken cancellationToken)
-        {
-            _connectCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var success = await _connectSemaphore.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
 
-            await _pipe.ConnectAsync(cancellationToken);
-
-            if (_pipe.IsConnected)
+            if (!success)
             {
-                _connectCancellationTokenSource.Dispose();
-                _pipe.ReadMode = PipeTransmissionMode.Message;
-                Connection.Set();
-                Connected?.BeginInvoke(this, EventArgs.Empty, x => ((EventHandler)x.AsyncState).EndInvoke(x), Connected);
+                throw new TimeoutException();
+            }
 
-                BeginRead();
+            try
+            {
+                if (IsConnected) return;
+
+                var elapsed = 0;
+
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (Disposed)
+                    {
+                        throw new ObjectDisposedException("NamedPipeClient");
+                    }
+
+                    var waitTime = timeout == Timeout.Infinite ? ConnectCheckInterval : timeout - elapsed;
+                    if (waitTime > ConnectCheckInterval)
+                    {
+                        waitTime = ConnectCheckInterval;
+                    }
+
+                    try
+                    {
+                        // ReSharper disable once MethodSupportsCancellation
+                        await _pipe.ConnectAsync(waitTime).ConfigureAwait(false);
+                        break;
+                    }
+                    catch (TimeoutException) when (timeout == Timeout.Infinite || (elapsed = unchecked(Environment.TickCount - startTime)) < timeout)
+                    {
+                    }
+                }
+
+                Connection.Set();
+                Connected?.InvokeAsync(this);
+                StartReading();
+            }
+            finally
+            {
+                _connectSemaphore.Release();
             }
         }
-
-        public Subscription ConnectAndSubscribe()
-        {
-            return ConnectAndSubscribe(new CancellationToken());
-        }
-
-        public Subscription ConnectAndSubscribe(CancellationToken cancellationToken)
+        
+        public async Task<Subscription> ConnectAndSubscribe(int timeout = Timeout.Infinite, CancellationToken cancellationToken = default(CancellationToken))
         {
             // Prevent race condition by subscribing first
             var subscription = Subscribe();
-            Connect(cancellationToken);
+            await Connect(timeout, cancellationToken).ConfigureAwait(false);
             return subscription;
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            try
-            {
-                _connectCancellationTokenSource?.Cancel();
-                _connectCancellationTokenSource?.Dispose();
-            }
-            catch (ObjectDisposedException)
-            {
-
-            }            
-
-            base.Dispose(disposing);
         }
 
         public event EventHandler Connected;

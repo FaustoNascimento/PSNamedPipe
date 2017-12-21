@@ -25,7 +25,7 @@ namespace PSNamedPipe
             return wrapper;
         }
 
-        public async Task Start(CancellationToken cancellationToken = default(CancellationToken))
+        public async Task StartAsync(CancellationToken cancellationToken = default(CancellationToken))
         {
             await _connectSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
 
@@ -35,7 +35,7 @@ namespace PSNamedPipe
 
                 Connection.Set();
                 Connected?.InvokeAsync(this);
-                StartReading();
+                StartReadingAsync();
             }
             finally
             {
@@ -43,11 +43,11 @@ namespace PSNamedPipe
             }
         }
 
-        public async Task<Subscription> StartAndSubscribe(CancellationToken cancellationToken = default(CancellationToken))
+        public async Task<Subscription> StartAndSubscribeAsync(CancellationToken cancellationToken = default(CancellationToken))
         {
             // Prevent race condition by subscribing first
             var subscription = Subscribe();
-            await Start(cancellationToken);
+            await StartAsync(cancellationToken);
             return subscription;
         }
 

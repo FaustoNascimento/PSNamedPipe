@@ -42,26 +42,26 @@ namespace PSNamedPipe
 
         public PipeTransmissionMode TransmissionMode => _pipe.TransmissionMode;
 
-        protected async void StartReading()
+        protected async void StartReadingAsync()
         {
             while (true)
             {
                 if (!IsConnected) break;
 
-                await GetNextMessage().ConfigureAwait(false);
+                await GetNextMessageAsync().ConfigureAwait(false);
             }
         }
 
-        private async Task GetNextMessage()
+        private async Task GetNextMessageAsync()
         {
             try
             {
                 // Get message size
-                var bufferMessageSize = await ReadNamedPipe(HeaderSize).ConfigureAwait(false);
+                var bufferMessageSize = await ReadNamedPipeAsync(HeaderSize).ConfigureAwait(false);
                 var messageSize = BitConverter.ToInt32(bufferMessageSize, 0);
 
                 // Get actual message
-                var message = await ReadNamedPipe(messageSize).ConfigureAwait(false);
+                var message = await ReadNamedPipeAsync(messageSize).ConfigureAwait(false);
 
                 // Post message
                 var messageEventArgs = new MessageAvailableEventArgs(message);
@@ -74,7 +74,7 @@ namespace PSNamedPipe
             }
         }
 
-        private async Task<byte[]> ReadNamedPipe(int count)
+        private async Task<byte[]> ReadNamedPipeAsync(int count)
         {
             var buffer = new byte[count];
             var bytesRead = await _pipe.ReadAsync(buffer, 0, count).ConfigureAwait(false);

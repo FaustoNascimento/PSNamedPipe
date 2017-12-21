@@ -27,7 +27,7 @@ namespace PSNamedPipe
             return wrapper;
         }
 
-        public async Task Connect(int timeout = Timeout.Infinite, CancellationToken cancellationToken = default(CancellationToken))
+        public async Task ConnectAsync(int timeout = Timeout.Infinite, CancellationToken cancellationToken = default(CancellationToken))
         {
             var startTime = Environment.TickCount;
 
@@ -72,7 +72,7 @@ namespace PSNamedPipe
 
                 Connection.Set();
                 Connected?.InvokeAsync(this);
-                StartReading();
+                StartReadingAsync();
             }
             finally
             {
@@ -80,11 +80,11 @@ namespace PSNamedPipe
             }
         }
         
-        public async Task<Subscription> ConnectAndSubscribe(int timeout = Timeout.Infinite, CancellationToken cancellationToken = default(CancellationToken))
+        public async Task<Subscription> ConnectAndSubscribeAsync(int timeout = Timeout.Infinite, CancellationToken cancellationToken = default(CancellationToken))
         {
             // Prevent race condition by subscribing first
             var subscription = Subscribe();
-            await Connect(timeout, cancellationToken).ConfigureAwait(false);
+            await ConnectAsync(timeout, cancellationToken).ConfigureAwait(false);
             return subscription;
         }
 
